@@ -1,0 +1,677 @@
+<?php
+/**
+ * Request Revision Interface
+ * TAU-UREO Portal
+ */
+
+require_once '../config/config.php';
+require_once '../includes/functions.php';
+require_once '../includes/email-template-functions.php';
+
+// Check if this is an AJAX request
+$isAjax = isset($_SERVER['HTTP_X_REQUESTED_WITH']) && 
+          strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
+
+// For AJAX requests, handle authentication failures with JSON
+if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    // Disable HTML error output for AJAX requests
+    ini_set('display_errors', 0);
+    error_reporting(E_ALL);
+    
+    // Set up error handler for AJAX requests
+    function ajaxErrorHandler($errno, $errstr, $errfile, $errline) {
+        $error_msg = "PHP Error [$errno]: $errstr in $errfile on line $errline";
+        error_log($error_msg);
+        if (!headers_sent()) {
+            header('Content-Type: application/json');
+        }
+        echo json_encode(['success' => false, 'message' => 'An internal error occurred. Please try again.']);
+        exit();
+    }
+    set_error_handler('ajaxErrorHandler');
+    
+    // Catch fatal errors
+    function ajaxShutdownFunction() {
+        $error = error_get_last();
+        if ($error !== null) {
+            $error_msg = "Fatal Error: " . $error['message'] . " in " . $error['file'] . " on line " . $error['line'];
+            error_log($error_msg);
+            if (!headers_sent()) {
+                header('Content-Type: application/json');
+            }
+            echo json_encode(['success' => false, 'message' => 'An internal error occurred. Please try again.']);
+            exit();
+        }
+    }
+    register_shutdown_function('ajaxShutdownFunction');
+}
+
+$queue_number = '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $queue_number = $_POST['queue_number'] ?? '';
+} else {
+    $queue_number = $_GET['queue'] ?? '';
+}
+
+if (empty($queue_number)) {
+    if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'message' => 'Invalid request - missing queue number']);
+        exit();
+    } else {
+        echo '<div class="alert alert-danger">Invalid request.</div>';
+        exit();
+    }
+}
+
+$conn = getDBConnection();
+
+// Get application details
+$app_stmt = $conn->prepare("SELECT * FROM applications WHERE queue_number = ?");
+$app_stmt->bind_param("s", $queue_number);
+$app_stmt->execute();
+$application = $app_stmt->get_result()->fetch_assoc();
+
+if (!$application) {
+    if ($isAjax && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'message' => 'Application not found']);
+        exit();
+    } else {
+        echo '<div class="alert alert-danger">Application not found.</div>';
+        exit();
+    }
+}
+
+// Get all documents
+$docs_stmt = $conn->prepare("SELECT * FROM documents WHERE queue_number = ? ORDER BY document_type, upload_timestamp DESC");
+$docs_stmt->bind_param("s", $queue_number);
+$docs_stmt->execute();
+$documents = $docs_stmt->get_result();
+
+// Group documents by type
+$grouped_docs = [];
+while ($doc = $documents->fetch_assoc()) {
+    $type = $doc['document_type'];
+    if (!isset($grouped_docs[$type])) {
+        $grouped_docs[$type] = [];
+    }
+    $grouped_docs[$type][] = $doc;
+}
+
+closeDBConnection($conn);
+
+// Handle AJAX submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // Disable HTML error output for AJAX requests
+    ini_set('display_errors', 0);
+    error_reporting(E_ALL);
+    
+    // Set up error handler for AJAX requests
+    function ajaxErrorHandler($errno, $errstr, $errfile, $errline) {
+        $error_msg = "PHP Error [$errno]: $errstr in $errfile on line $errline";
+        error_log($error_msg);
+        echo json_encode(['success' => false, 'message' => 'An internal error occurred. Please try again.']);
+        exit();
+    }
+    set_error_handler('ajaxErrorHandler');
+    
+    // Catch fatal errors
+    function ajaxShutdownFunction() {
+        $error = error_get_last();
+        if ($error !== null) {
+            $error_msg = "Fatal Error: " . $error['message'] . " in " . $error['file'] . " on line " . $error['line'];
+            error_log($error_msg);
+            echo json_encode(['success' => false, 'message' => 'An internal error occurred. Please try again.']);
+            exit();
+        }
+    }
+    register_shutdown_function('ajaxShutdownFunction');
+    
+    header('Content-Type: application/json');
+    
+    // Temporary test - just return success
+    echo json_encode(['success' => true, 'message' => 'AJAX test successful']);
+    exit();
+    
+    /*
+    try {
+        $revision_notes = $_POST['body'] ?? '';
+        
+        if (empty($queue_number) || empty($revision_notes)) {
+            echo json_encode(['success' => false, 'message' => 'Missing required parameters']);
+            exit();
+        }
+        
+        $staff_id = $_SESSION['user_id'] ?? null;
+        if (!$staff_id) {
+            echo json_encode(['success' => false, 'message' => 'Session expired. Please refresh the page.']);
+            exit();
+        }
+        
+        $conn = getDBConnection();
+    
+    try {
+        // Get current application
+        $app_stmt = $conn->prepare("SELECT * FROM applications WHERE queue_number = ?");
+        $app_stmt->bind_param("s", $queue_number);
+        $app_stmt->execute();
+        $application = $app_stmt->get_result()->fetch_assoc();
+        
+        if (!$application) {
+            throw new Exception("Application not found");
+        }
+        
+        // Begin transaction
+        $conn->begin_transaction();
+        
+        // Update application status
+        $update_stmt = $conn->prepare("UPDATE applications SET current_status = ?, assigned_staff_id = ?, last_updated = NOW() WHERE queue_number = ?");
+        $new_status = 'REVISIONS_REQUIRED';
+        $update_stmt->bind_param("sis", $new_status, $staff_id, $queue_number);
+        $update_stmt->execute();
+        
+        // Insert status history
+        $old_status = $application['current_status'];
+        $history_stmt = $conn->prepare("INSERT INTO status_history (queue_number, previous_status, new_status, changed_by, changed_by_type, notes, timestamp) VALUES (?, ?, ?, ?, 'staff', ?, NOW())");
+        $history_stmt->bind_param("sssiss", $queue_number, $old_status, $new_status, $staff_id, $revision_notes);
+        $history_stmt->execute();
+        
+        // Log activity
+        logStaffActivity($staff_id, $queue_number, 'revision_request', 'Requested application revision');
+        
+        // Create system message
+        $message_body = $revision_notes;
+        $msg_stmt = $conn->prepare("INSERT INTO system_messages (queue_number, message_type, message_content, created_at) VALUES (?, 'revision_request', ?, NOW())");
+        $msg_stmt->bind_param("ss", $queue_number, $message_body);
+        $msg_stmt->execute();
+        
+        // Record in messages table for communication history
+        $hist_stmt = $conn->prepare("
+            INSERT INTO messages (queue_number, sender_type, sender_id, message_content, sent_at) 
+            VALUES (?, 'staff', ?, ?, NOW())
+        ");
+        $hist_stmt->bind_param("sis", $queue_number, $staff_id, $message_body);
+        $hist_stmt->execute();
+        
+        // Commit transaction
+        $conn->commit();
+        
+        echo json_encode(['success' => true, 'message' => 'Revision request sent successfully']);
+        
+    } catch (Exception $e) {
+        $conn->rollback();
+        error_log("Error sending revision request: " . $e->getMessage());
+        echo json_encode(['success' => false, 'message' => 'Failed to send revision request']);
+    }
+    
+    closeDBConnection($conn);
+    exit();
+}
+
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <style>
+        body {
+            padding: 20px;
+            background: transparent;
+        }
+        .document-card {
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            background: #f8f9fa;
+        }
+        .document-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        .document-icon {
+            font-size: 24px;
+            color: #0d6efd;
+        }
+        .document-info {
+            flex: 1;
+            margin-left: 15px;
+        }
+        .document-title {
+            font-weight: 600;
+            font-size: 1rem;
+            margin-bottom: 3px;
+        }
+        .document-meta {
+            font-size: 0.875rem;
+            color: #6c757d;
+        }
+        .message-selector {
+            margin-top: 10px;
+        }
+        .custom-message-box {
+            margin-top: 10px;
+            display: none;
+        }
+        .template-fields {
+            margin-top: 10px;
+            display: none;
+        }
+        .preview-box {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .preview-title {
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #495057;
+            border-bottom: 2px solid #dee2e6;
+            padding-bottom: 10px;
+        }
+        .preview-content {
+            white-space: pre-wrap;
+            line-height: 1.6;
+            color: #212529;
+        }
+        .no-selection {
+            color: #6c757d;
+            font-style: italic;
+        }
+        .document-issue-item {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 8px;
+        }
+        .document-issue-title {
+            font-weight: 600;
+            color: #856404;
+            margin-bottom: 5px;
+        }
+        .document-issue-text {
+            color: #533301;
+            margin-bottom: 0;
+        }
+    </style>
+</head>
+<body>
+
+<form id="revisionForm">
+    <input type="hidden" name="queue_number" value="<?php echo htmlspecialchars($queue_number); ?>">
+    
+    <div class="mb-4">
+        <h6 class="mb-3"><i class="bi bi-files"></i> Select Issues for Each Document:</h6>
+        
+        <?php if (empty($grouped_docs)): ?>
+            <div class="alert alert-info">
+                <i class="bi bi-info-circle"></i> No documents uploaded yet.
+            </div>
+        <?php else: ?>
+            <?php foreach ($grouped_docs as $doc_type => $docs): ?>
+                <?php foreach ($docs as $index => $doc): ?>
+                    <div class="document-card">
+                        <div class="document-header">
+                            <i class="bi bi-file-earmark-pdf document-icon"></i>
+                            <div class="document-info">
+                                <div class="document-title"><?php echo htmlspecialchars($doc_type); ?></div>
+                                <div class="document-meta">
+                                    <i class="bi bi-file-text"></i> <?php echo htmlspecialchars(basename($doc['file_path'])); ?>
+                                    <span class="ms-2"><i class="bi bi-clock"></i> <?php echo date('M d, Y', strtotime($doc['upload_timestamp'])); ?></span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="message-selector">
+                            <select class="form-select template-dropdown" data-doc-id="<?php echo $doc['document_id']; ?>" data-doc-type="<?php echo htmlspecialchars($doc_type); ?>">
+                                <option value="">No issue (document is acceptable)</option>
+                                <?php
+                                // Get revision-related templates
+                                $categories = getTemplateCategories();
+                                foreach ($categories as $cat_code => $cat_name): 
+                                    $templates = getEmailTemplates($cat_code);
+                                    if (count($templates) > 0):
+                                ?>
+                                    <optgroup label="<?php echo htmlspecialchars($cat_name); ?>">
+                                        <?php foreach ($templates as $template): ?>
+                                            <option value="<?php echo htmlspecialchars($template['template_code']); ?>"
+                                                    data-subject="<?php echo htmlspecialchars($template['subject']); ?>"
+                                                    data-body="<?php echo htmlspecialchars($template['body']); ?>"
+                                                    data-description="<?php echo htmlspecialchars($template['description'] ?? ''); ?>">
+                                                <?php echo htmlspecialchars($template['template_name']); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </optgroup>
+                                <?php 
+                                    endif;
+                                endforeach; 
+                                ?>
+                                <optgroup label="Document-Specific Issues">
+                                    <option value="INCOMPLETE_SECTION">Document is incomplete - missing required sections</option>
+                                    <option value="ILLEGIBLE_TEXT">Document contains illegible or unclear text</option>
+                                    <option value="MISSING_SIGNATURE">Document requires authorized signature</option>
+                                    <option value="INCORRECT_INFO">Document has incorrect or outdated information</option>
+                                    <option value="POOR_QUALITY">Document quality is poor - please upload higher resolution</option>
+                                    <option value="WRONG_FORMAT">File format is incorrect - please use PDF format</option>
+                                    <option value="EXPIRED_DOC">Document has expired - please provide updated version</option>
+                                    <option value="CUSTOM">Custom message (specify below)</option>
+                                </optgroup>
+                            </select>
+                            
+                            <div class="custom-message-box" id="custom-<?php echo $doc['document_id']; ?>">
+                                <textarea class="form-control mt-2 custom-message-input" rows="2" placeholder="Enter your custom message for this document..."></textarea>
+                            </div>
+                            
+                            <!-- Template-specific fields for this document -->
+                            <div class="template-fields" id="fields-<?php echo $doc['document_id']; ?>"></div>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            <?php endforeach; ?>
+        <?php endif; ?>
+    </div>
+    
+    <div class="preview-box">
+        <div class="preview-title"><i class="bi bi-eye"></i> Combined Message Preview:</div>
+        <div class="preview-content" id="messagePreview">
+            <span class="no-selection">Select issues above to preview the revision request message...</span>
+        </div>
+    </div>
+    
+    <textarea name="body" id="combinedMessage" style="display: none;"></textarea>
+    <input type="hidden" name="revisions_list" id="revisionsListInput">
+    
+    <div class="mt-4 d-flex justify-content-end gap-2">
+        <button type="button" class="btn btn-secondary" onclick="window.parent.postMessage({type: 'closeRevisionModal'}, '*')">
+            Cancel
+        </button>
+        <button type="submit" class="btn btn-warning" id="submitBtn">
+            <i class="bi bi-arrow-clockwise"></i> Send Revision Request
+        </button>
+    </div>
+</form>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const templateDropdowns = document.querySelectorAll('.template-dropdown');
+    const messagePreview = document.getElementById('messagePreview');
+    const combinedMessage = document.getElementById('combinedMessage');
+    const revisionsListInput = document.getElementById('revisionsListInput');
+    const revisionForm = document.getElementById('revisionForm');
+    const submitBtn = document.getElementById('submitBtn');
+    
+    // Predefined messages for quick issues
+    const quickMessages = {
+        'INCOMPLETE_SECTION': 'Document is incomplete - missing required sections',
+        'ILLEGIBLE_TEXT': 'Document contains illegible or unclear text',
+        'MISSING_SIGNATURE': 'Document requires authorized signature',
+        'INCORRECT_INFO': 'Document has incorrect or outdated information',
+        'POOR_QUALITY': 'Document quality is poor - please upload higher resolution',
+        'WRONG_FORMAT': 'File format is incorrect - please use PDF format',
+        'EXPIRED_DOC': 'Document has expired - please provide updated version'
+    };
+    
+    // Handle dropdown changes for each document
+    templateDropdowns.forEach(dropdown => {
+        dropdown.addEventListener('change', function() {
+            const docId = this.dataset.docId;
+            const customBox = document.getElementById('custom-' + docId);
+            const templateFields = document.getElementById('fields-' + docId);
+            const selectedValue = this.value;
+            const selectedOption = this.options[this.selectedIndex];
+            
+            // Reset all fields for this document
+            customBox.style.display = 'none';
+            templateFields.style.display = 'none';
+            templateFields.innerHTML = '';
+            
+            if (selectedValue === 'CUSTOM') {
+                // Show custom message box
+                customBox.style.display = 'block';
+            } else if (selectedValue && !quickMessages[selectedValue]) {
+                // This is a template code, show template-specific fields
+                templateFields.style.display = 'block';
+                
+                // Add template-specific fields based on the selected template
+                if (selectedValue === 'INCOMPLETE_DOCS') {
+                    templateFields.innerHTML = `
+                        <div class="mt-2">
+                            <label class="form-label fw-bold text-danger">Missing Sections/Items:</label>
+                            <textarea class="form-control template-field-input" rows="3" placeholder="• Section 1\n• Section 2\n• Section 3" data-field="missing_documents"></textarea>
+                            <small class="text-muted">List missing sections for this document</small>
+                        </div>
+                    `;
+                } else if (selectedValue === 'MISSING_SIGNATURES') {
+                    templateFields.innerHTML = `
+                        <div class="mt-2">
+                            <label class="form-label fw-bold text-danger">Signature Requirements:</label>
+                            <textarea class="form-control template-field-input" rows="2" placeholder="Specify signature requirements for this document" data-field="signature_notes"></textarea>
+                        </div>
+                    `;
+                } else if (selectedValue === 'REVISIONS_NEEDED') {
+                    templateFields.innerHTML = `
+                        <div class="mt-2">
+                            <label class="form-label fw-bold text-warning">Required Revisions:</label>
+                            <textarea class="form-control template-field-input" rows="3" placeholder="• Revision 1\n• Revision 2" data-field="revision_details"></textarea>
+                        </div>
+                    `;
+                }
+                
+                // Add event listeners to template fields
+                templateFields.querySelectorAll('.template-field-input').forEach(input => {
+                    input.addEventListener('input', updatePreview);
+                });
+            }
+            
+            updatePreview();
+        });
+    });
+    
+    // Handle custom message input
+    document.querySelectorAll('.custom-message-input').forEach(input => {
+        input.addEventListener('input', updatePreview);
+    });
+    
+    function updatePreview() {
+        let issues = [];
+        let hasValidSelection = false;
+        let allAcceptable = true;
+        let hasAnySelection = false;
+        
+        templateDropdowns.forEach(dropdown => {
+            const selectedValue = dropdown.value;
+            
+            if (selectedValue && selectedValue !== '') {
+                hasAnySelection = true;
+                // If any document has an actual issue selected, it's not all acceptable
+                allAcceptable = false;
+                hasValidSelection = true;
+                
+                const docType = dropdown.dataset.docType;
+                const docId = dropdown.dataset.docId;
+                const selectedOption = dropdown.options[dropdown.selectedIndex];
+                
+                let issueText = '';
+                
+                if (selectedValue === 'CUSTOM') {
+                    const customInput = document.querySelector('#custom-' + docId + ' .custom-message-input');
+                    if (customInput && customInput.value.trim() !== '') {
+                        issueText = customInput.value.trim();
+                    }
+                } else if (quickMessages[selectedValue]) {
+                    issueText = quickMessages[selectedValue];
+                } else {
+                    // This is a template - get the template name and any additional details
+                    issueText = selectedOption.textContent.trim();
+                    
+                    // Add template field details if any
+                    const templateFields = document.getElementById('fields-' + docId);
+                    const fieldInputs = templateFields.querySelectorAll('.template-field-input');
+                    const details = [];
+                    
+                    fieldInputs.forEach(input => {
+                        if (input.value.trim()) {
+                            details.push(input.value.trim());
+                        }
+                    });
+                    
+                    if (details.length > 0) {
+                        issueText += ':\n' + details.join('\n');
+                    }
+                }
+                
+                if (issueText) {
+                    issues.push({
+                        docType: docType,
+                        issue: issueText
+                    });
+                }
+            } else if (selectedValue === '') {
+                // Empty selection means "No issue" by default
+                hasAnySelection = true;
+            }
+        });
+        
+        // Check if all documents are marked as acceptable (no issues)
+        if (hasAnySelection && allAcceptable && issues.length === 0) {
+            messagePreview.innerHTML = `
+                <div class="alert alert-success">
+                    <i class="bi bi-check-circle-fill"></i> <strong>All Documents Acceptable</strong><br>
+                    All uploaded documents have been marked as acceptable. To approve this application, please use the <strong>"Approve"</strong> button instead of sending a revision request.
+                </div>
+            `;
+            combinedMessage.value = '';
+            revisionsListInput.value = '';
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="bi bi-check-circle"></i> Use "Approve" Instead';
+            return;
+        }
+        
+        if (issues.length > 0) {
+            // Create formatted message
+            let previewHtml = '<strong>Dear Applicant,</strong><br><br>';
+            previewHtml += 'Your application requires the following revisions:<br><br>';
+            
+            issues.forEach(item => {
+                previewHtml += `<div class="document-issue-item">`;
+                previewHtml += `<div class="document-issue-title">${item.docType}:</div>`;
+                previewHtml += `<div class="document-issue-text">${item.issue.replace(/\n/g, '<br>')}</div>`;
+                previewHtml += `</div>`;
+            });
+            
+            previewHtml += '<br>Please address these issues and resubmit your application.<br><br>';
+            previewHtml += '<strong>Thank you.</strong>';
+            
+            messagePreview.innerHTML = previewHtml;
+            
+            // Create the final message for submission
+            let finalMessage = 'Dear {{applicant_name}},\n\n';
+            finalMessage += 'Your application requires the following revisions:\n\n';
+            
+            const revisionsList = issues.map(item => `${item.docType}: ${item.issue}`).join('\n• ');
+            finalMessage += '• ' + revisionsList;
+            
+            finalMessage += '\n\nPlease address these issues and resubmit your application.\n\nThank you.';
+            
+            combinedMessage.value = finalMessage;
+            revisionsListInput.value = revisionsList;
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Send Revision Request';
+            
+        } else {
+            messagePreview.innerHTML = '<span class="no-selection">Select issues above to preview the revision request message...</span>';
+            combinedMessage.value = '';
+            revisionsListInput.value = '';
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Send Revision Request';
+        }
+    }
+    
+    // Handle form submission
+    revisionForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        // First check if all documents are acceptable - prevent submission
+        let allAcceptable = true;
+        let hasAnySelection = false;
+        
+        templateDropdowns.forEach(dropdown => {
+            const selectedValue = dropdown.value;
+            if (selectedValue && selectedValue !== '') {
+                hasAnySelection = true;
+                allAcceptable = false;
+            } else if (selectedValue === '') {
+                hasAnySelection = true;
+            }
+        });
+        
+        if (hasAnySelection && allAcceptable) {
+            alert('All documents are marked as acceptable. Please use the "Approve" button instead of sending a revision request.');
+            return;
+        }
+        
+        // Now check if there are actual issues to send
+        const messageBody = combinedMessage.value;
+        
+        if (!messageBody || messageBody.trim() === '') {
+            alert('Please select at least one issue for any document before submitting.');
+            return;
+        }
+        
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Sending...';
+        
+        const formData = new FormData(revisionForm);
+        formData.append('ajax', '1'); // Mark as AJAX request
+        
+        fetch('request-revision.php', {
+            method: 'POST',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: formData
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Network response was not ok: ' + response.status);
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (data.success) {
+                alert(data.message || 'Revision request sent successfully.');
+                window.parent.postMessage({type: 'revisionRequestSent', success: true}, '*');
+            } else {
+                alert('Error: ' + (data.message || 'Failed to send revision request.'));
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Send Revision Request';
+                updatePreview(); // Re-enable button if there are valid selections
+            }
+        })
+        .catch(error => {
+            console.error('Fetch error:', error);
+            alert('Error: ' + error.message);
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Send Revision Request';
+            updatePreview(); // Re-enable button if there are valid selections
+        });
+    });
+});
+</script>
+
+</body>
+</html>

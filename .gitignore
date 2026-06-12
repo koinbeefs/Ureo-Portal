@@ -1,0 +1,44 @@
+# PHP
+vendor/
+composer.lock
+
+# Environment
+.env
+.env.local
+.env.*.local
+config/signature_key.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+storage/logs/
+debug_log.txt
+debug-results.txt
+
+# Temporary / Test files
+test*.php
+tmp_*.php
+tmp_*.txt
+simple-output.txt
+temp/
+test*.pdf
+test*.docx
+*.pdf
+converted/
+
+# Uploads
+uploads/*
+
+# ML Models
+models/
+data/conversions/
+calibrate_out.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

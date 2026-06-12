@@ -1,0 +1,7 @@
+ID: 1 | Name: Committee for Human Use
+ID: 2 | Name: Committee for Animal Welfare
+ID: 3 | Name: Committee for Plant Use
+ID: 4 | Name: Committee for Microbiological/Biotechnological Use
+ID: 5 | Name: Committee for Engineering
+ID: 6 | Name: Committee for Information Technology Use
+ID: 7 | Name: Committee for Food Technology Use
